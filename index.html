@@ -186,7 +186,7 @@ tbody tr:has(.ck:checked){background:color-mix(in srgb,var(--pri) 15%,transparen
 
 <nav><div class="brand"><b>Two Tales</b><small>Business Admin</small></div>
 <a data-p="dash"><span class="ic">◈</span>Dashboard</a><a data-p="pos"><span class="ic">❖</span>Point of Sales</a><a data-p="products"><span class="ic">◇</span>Products</a><a data-p="orders"><span class="ic">☰</span>Orders &amp; Sales</a><a data-p="cal"><span class="ic">▦</span>Order Calendar</a>
-<a data-p="analytics"><span class="ic">▥</span>Analytics</a><a data-p="inv"><span class="ic">⬡</span>Inventory</a><a data-p="staff"><span class="ic">♙</span>Staff</a><a data-p="cust"><span class="ic">☺</span>Customers</a><a data-p="rep"><span class="ic">✦</span>Reports</a>
+<a data-p="gifts"><span class="ic">🎁</span> Gifts &amp; Rewards</a><a data-p="vouchers"><span class="ic">⌁</span> Vouchers</a><a data-p="analytics"><span class="ic">▥</span>Analytics</a><a data-p="inv"><span class="ic">⬡</span>Inventory</a><a data-p="staff"><span class="ic">♙</span>Staff</a><a data-p="cust"><span class="ic">☺</span>Customers</a><a data-p="rep"><span class="ic">✦</span>Reports</a>
 <div style="margin-top:auto"><button class="btn theme" onclick="toggleTheme()"><span id="tic">☾</span><em style="font-style:normal" id="tlb">Theme</em></button>
 <div id="cloud-status" style="font-size:11px;line-height:1.5;color:var(--mut);padding:8px 4px" role="status">Cloud: connecting…</div>
 <button class="btn" style="width:100%;margin:2px 0" onclick="refreshCloud()">↻ Refresh cloud data</button>
@@ -198,8 +198,8 @@ tbody tr:has(.ck:checked){background:color-mix(in srgb,var(--pri) 15%,transparen
 
 <script>
 /* ===== SUPABASE CONFIG: fill both values before opening the app ===== */
-const SUPABASE_URL = 'https://hntdmbezophnnqjycxns.supabase.co';      // e.g. https://xxxx.supabase.co
-const SUPABASE_KEY = 'sb_publishable_Nn7dC0a9TIq7P6Pnwb7y7A_g0m0PnCW';      // anon public key
+const SUPABASE_URL = '';      // e.g. https://xxxx.supabase.co
+const SUPABASE_KEY = '';      // anon public key
 /* Public anon/publishable key only. NEVER paste the Supabase service_role key. */
 
 const $ = s => document.querySelector(s);
@@ -208,12 +208,13 @@ const RM = n => 'RM ' + Number(n || 0).toFixed(2);
 const today = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 const uid = () => Date.now() * 1000 + Math.floor(Math.random() * 1000); // safe integer, low collision risk across devices
 const K = 'shoppos_db'; // Legacy browser-only data, offered for one-time migration.
-const emptyDb = () => ({products:[],orders:[],customers:[],inventory:[],cash:[],staff:[]});
+const emptyDb = () => ({products:[],orders:[],customers:[],inventory:[],cash:[],staff:[],gifts:[],giftRedemptions:[],vouchers:[]});
 function upgradeDb(raw) {
   const value = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
   const result = {...emptyDb(),...value};
-  for (const a of ['products','orders','customers','inventory','cash','staff'])
+  for (const a of ['products','orders','customers','inventory','cash','staff','gifts','giftRedemptions','vouchers'])
     if (!Array.isArray(result[a])) result[a] = [];
+  result.gifts.forEach(g => { if (!Array.isArray(g.variants)) g.variants=[]; });
   result.products.forEach(p => {
     if (!Array.isArray(p.variants)) p.variants = [];
     if (p.stock === undefined) p.stock = 0;
@@ -449,7 +450,7 @@ const qtyOf = o => o.items.reduce((a, i) => a + i.qty, 0);
 const costOf = o => o.items.reduce((a, i) => a + i.qty * (i.cost || 0), 0);
 
 /* ---------- navigation ---------- */
-const views = { dash, pos, products, orders, cal: calendar, analytics, inv, staff, cust, rep };
+const views = { dash, pos, products, gifts, vouchers, orders, cal: calendar, analytics, inv, staff, cust, rep };
 function go(p) {
   if (!cloudReady) return;
   const same = started && p === page;   // refresh of the same page -> no replayed entrance animation
@@ -564,9 +565,12 @@ let saleNotes = '', posError = '', lastSaleId = null, retrySale = null;
 const money = n => Math.round((Number(n)||0)*100 + 1e-7)/100;
 const sub = () => money(cart.reduce((a,c)=>a+c.price*c.qty,0));
 const discountAmount = () => discountType === 'percent' ? money(sub()*Math.min(100,Math.max(0,Number(discountValue)||0))/100) : Math.max(0,Number(discountValue)||0);
-const payable = () => money(Math.max(0,sub()-discountAmount()-Math.max(0,Number(redeemPoints)||0)*.1));
+const voucherDiscount=()=>{const v=db.vouchers.find(x=>String(x.id)===String(selectedVoucher));return v&&voucherAvailable(v,db.customers.find(c=>String(c.id)===String(cmem)))?Math.min(Math.max(0,sub()-discountAmount()),v.type==='percent'?money((sub()-discountAmount())*Number(v.value)/100):Number(v.value)||0):0;};
+const payable = () => money(Math.max(0,sub()-discountAmount()-voucherDiscount()-Math.max(0,Number(redeemPoints)||0)*.1));
+let selectedVoucher='';
 const earnedPoints = o => o.status === 'Completed' && o.loyaltyEligible && o.customerId != null ? Math.floor((Number(o.paid)||0)/10) : 0;
-const customerPoints = c => (Number(c.pointsOpening)||0) + db.orders.filter(o => belongsToCustomer(o,c) && o.status === 'Completed').reduce((a,o)=>a+earnedPoints(o)-(Number(o.redeemedPoints)||0),0);
+const customerPoints = c => (Number(c.pointsOpening)||0) + db.orders.filter(o => belongsToCustomer(o,c) && o.status === 'Completed').reduce((a,o)=>a+earnedPoints(o)-(Number(o.redeemedPoints)||0),0)-db.giftRedemptions.filter(r=>String(r.customerId)===String(c.id)&&r.status!=='Cancelled').reduce((a,r)=>a+(Number(r.points)||0),0);
+function voucherAvailable(v,customer){if(!v)return false;const now=today(), used=db.orders.filter(o=>o.status==='Completed'&&String(o.voucherId)===String(v.id));return v.active!==false&&(!v.starts||v.starts<=now)&&(!v.expires||v.expires>=now)&&(!Number(v.limit)||used.length<Number(v.limit))&&(v.scope==='public'||(customer&&String(v.customerId)===String(customer.id)))&&(!Number(v.perCustomerLimit)||!customer||used.filter(o=>String(o.customerId)===String(customer.id)).length<Number(v.perCustomerLimit));}
 function pos() {
   const due=payable(), chg=(parseFloat(tender)||0)-due;
   const customer=db.customers.find(c=>String(c.id)===String(cmem));
@@ -581,14 +585,16 @@ function pos() {
   <div class="seller-panel"><strong>Sales staff on duty</strong><div class="mut" style="font-size:12px">Required for every checkout.</div>
   <label>Seller<select onchange="changeSeller(this.value)"><option value="">— Select sales staff —</option>${sellerOptions().map(x=>`<option value="${esc(x.id)}" ${String(activeSeller)===x.id?'selected':''}>${esc(x.name)}</option>`).join('')}</select></label>
   ${!db.staff.some(x=>x.status==='Active')?`<p class="mut">No active staff. <button class="btn" onclick="go('staff')">Register staff</button></p>`:''}</div>
-  <label>Customer<select onchange="ctype=this.value;cmem='';redeemPoints='0';go('pos')"><option ${ctype==='Walk-in'?'selected':''}>Walk-in</option><option ${ctype==='Member'?'selected':''}>Member</option></select></label>
-  ${ctype==='Member'?`<label>Select member<select onchange="cmem=this.value;redeemPoints='0';go('pos')"><option value="">— Choose customer —</option>${db.customers.map(c=>`<option value="${esc(c.id)}" ${String(c.id)===String(cmem)?'selected':''}>${esc(c.name)}${c.phone?' · '+esc(c.phone):''}</option>`).join('')}</select></label>
+  <label>Customer<select onchange="ctype=this.value;cmem='';redeemPoints='0';selectedVoucher='';go('pos')"><option ${ctype==='Walk-in'?'selected':''}>Walk-in</option><option ${ctype==='Member'?'selected':''}>Member</option></select></label>
+  ${ctype==='Member'?`<label>Select member<select onchange="cmem=this.value;redeemPoints='0';selectedVoucher='';go('pos')"><option value="">— Choose customer —</option>${db.customers.map(c=>`<option value="${esc(c.id)}" ${String(c.id)===String(cmem)?'selected':''}>${esc(c.name)}${c.phone?' · '+esc(c.phone):''}</option>`).join('')}</select></label>
   ${customer?`<div class="loyalty-panel">★ ${esc(customer.name)} · <b>${customerPoints(customer)}</b> points available <small>1 point = RM0.10 · Earn 1 point per RM10 paid</small></div>`:''}`:''}
   ${tbl(['Item','Qty','Total',''],cart.map((c,i)=>[esc(c.name),`<button class="btn" onclick="qty(${i},-1)">−</button> ${c.qty} <button class="btn" onclick="qty(${i},1)">+</button>`,RM(c.price*c.qty),`<button class="btn d" onclick="if(retrySale){posFailure('Check the pending checkout first')}else{cart.splice(${i},1);go('pos')}">×</button>`]))}
   <div class="bill"><div><span>Subtotal</span><strong>${RM(sub())}</strong></div>
   <div class="row" style="align-items:end"><label style="flex:1">Discount<select onchange="discountType=this.value;go('pos')"><option value="fixed" ${discountType==='fixed'?'selected':''}>RM fixed</option><option value="percent" ${discountType==='percent'?'selected':''}>Percent %</option></select></label><label style="flex:1">Value<input type="number" min="0" step="0.01" value="${esc(discountValue)}" onchange="discountValue=this.value;go('pos')"></label></div>
   <div><span>Discount</span><strong>−${RM(discountAmount())}</strong></div>
-  ${customer?`<label>Redeem points (whole points, max ${Math.min(Math.max(0,customerPoints(customer)),Math.floor(Math.max(0,sub()-discountAmount())*10))})<input type="number" min="0" step="1" value="${esc(redeemPoints)}" onchange="redeemPoints=this.value;go('pos')"></label><div><span>Points credit</span><strong>−${RM((Number(redeemPoints)||0)*.1)}</strong></div>`:''}
+  <label>Voucher<select onchange="selectedVoucher=this.value;redeemPoints='0';go('pos')"><option value="">— No voucher —</option>${db.vouchers.filter(v=>voucherAvailable(v,customer)).map(v=>`<option value="${esc(v.id)}" ${String(selectedVoucher)===String(v.id)?'selected':''}>${esc(v.code)} — ${v.type==='percent'?esc(v.value)+'%':RM(v.value)}</option>`).join('')}</select></label>
+  <div><span>Voucher discount</span><strong>−${RM(voucherDiscount())}</strong></div>
+  ${customer?`<label>Redeem points (whole points, max ${Math.min(Math.max(0,customerPoints(customer)),Math.floor(Math.max(0,sub()-discountAmount()-voucherDiscount())*10))})<input type="number" min="0" step="1" value="${esc(redeemPoints)}" onchange="redeemPoints=this.value;go('pos')"></label><div><span>Points credit</span><strong>−${RM((Number(redeemPoints)||0)*.1)}</strong></div>`:''}
   <div class="grand"><span>Total payable</span><strong>${RM(due)}</strong></div>
   ${customer?`<p class="mut" style="font-size:12px">Estimated points earned: ${Math.floor(due/10)} (after payment is recorded)</p>`:''}</div>
   <label>Payment<select onchange="pm=this.value;qrConfirmed=false;go('pos')"><option ${pm==='Cash'?'selected':''}>Cash</option><option ${pm==='QR PAY'?'selected':''}>QR PAY</option></select></label>
@@ -704,15 +710,16 @@ async function checkout() {
   const member=ctype==='Member'?db.customers.find(c=>String(c.id)===String(cmem)):null;
   if (ctype==='Member' && !member) return posFailure('Select a valid customer.');
   if (discountType==='percent' && Number(discountValue)>100 || !Number.isFinite(Number(discountValue)) || Number(discountValue)<0 || discountAmount()>sub()) return posFailure('Discount must be within the subtotal (or 0–100%).');
+  if(selectedVoucher&&!voucherAvailable(db.vouchers.find(v=>String(v.id)===String(selectedVoucher)),member)) return posFailure('Voucher is no longer available.');
   const r=Number(redeemPoints);
-  if (!Number.isSafeInteger(r) || r<0 || r>(member?customerPoints(member):0) || r/10>sub()-discountAmount()+0.001) return posFailure('Invalid points redemption or insufficient balance.');
+  if (!Number.isSafeInteger(r) || r<0 || r>(member?customerPoints(member):0) || r/10>sub()-discountAmount()-voucherDiscount()+0.001) return posFailure('Invalid points redemption or insufficient balance.');
   if (pm==='Cash' && (!tender.trim() || !Number.isFinite(Number(tender)) || Number(tender)<payable())) return posFailure('Enter cash received equal to or above the total.');
   if (pm==='QR PAY' && !qrConfirmed) return posFailure('Verify the QR payment before checkout.');
   if (cloudFailed || !cloudReady) return posFailure('Cloud is disconnected. No sale has been confirmed.');
   // Preserve the request ID while retrying an uncertain response to avoid duplicate charges.
   if (!retrySale) retrySale = {requestId: (crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random()}-${Math.random()}`),orderId:uid()};
   let sale={requestId:retrySale.requestId,orderId:retrySale.orderId, sellerId:seller.id,customerId:member?member.id:null,items:cart.map(c=>({productId:c.productId,variantId:c.variantId,qty:c.qty,price:c.price})),
-    date:today(), payment:pm,discountType,discountValue:Number(discountValue)||0,redeemPoints:r,cashReceived:Number(tender)||0,qrConfirmed,notes:saleNotes};
+    date:today(), payment:pm,discountType,discountValue:Number(discountValue)||0,voucherId:selectedVoucher||null,redeemPoints:r,cashReceived:Number(tender)||0,qrConfirmed,notes:saleNotes};
   if(retrySale.payload) sale=retrySale.payload; else retrySale.payload=sale;
   checkoutBusy=true; posError='';
   const button=$('#checkout-btn'); if(button){button.disabled=true;button.textContent='Verifying and saving…';}
@@ -727,7 +734,7 @@ async function checkout() {
     const {data:latest,error:readError}=await sb.from('business_state').select('payload,version').eq('user_id',cloudUser.id).single();
     if(readError) {cloudVersion=data.version; throw new Error('Sale saved, but refresh failed. Check Orders before retrying: '+readError.message);}
     db=upgradeDb(latest.payload);cloudVersion=latest.version;
-    lastSaleId=confirmed.id; retrySale=null; cart=[];tender='';saleNotes='';redeemPoints='0';discountValue='0';qrConfirmed=false;
+    lastSaleId=confirmed.id; retrySale=null; cart=[];tender='';saleNotes='';redeemPoints='0';discountValue='0';selectedVoucher='';qrConfirmed=false;
     status('Cloud: sale saved ✓');go('pos');
     showReceipt(confirmed);
     toast(data.alreadyProcessed?'Existing transaction confirmed':'Sale #'+confirmed.no+' saved to cloud');
@@ -748,6 +755,7 @@ function receiptMarkup(o) {
   <div class="receipt-line"></div>${(o.items||[]).map(i=>`<div class="receipt-row"><span>${esc(i.name)}<br><small>${esc(i.qty)} × ${RM(i.price)}</small></span><b>${RM(Number(i.qty)*Number(i.price))}</b></div>`).join('')}
   <div class="receipt-line"></div><div class="receipt-row"><span>Subtotal</span><b>${RM(s)}</b></div>
   <div class="receipt-row"><span>Discount</span><b>−${RM(o.discount)}</b></div>
+  ${o.voucherCode?`<div class="receipt-row"><span>Voucher ${esc(o.voucherCode)}</span><b>−${RM(o.voucherDiscount)}</b></div>`:''}
   <div class="receipt-row"><span>Points redeemed (${Number(o.redeemedPoints)||0})</span><b>−${RM((Number(o.redeemedPoints)||0)/10)}</b></div>
   <div class="receipt-row grand"><span>TOTAL</span><b>${RM(o.total)}</b></div>
   <div class="receipt-row"><span>Paid</span><b>${RM(o.paid)}</b></div>
@@ -920,6 +928,32 @@ const impC = () => pick(t => {
   save(); go('cust');
 });
 const expC = () => dl('customers.csv', ['Name,Phone,Notes,Since', ...db.customers.map(c => [c.name, c.phone, c.notes, c.since].map(x => `"${String(x ?? '').replace(/"/g, '""')}"`).join(','))].join('\n'), 'text/csv');
+
+
+/* ---------- Gift catalogue & points redemption (server-validated) ---------- */
+const giftQty = g => (g.variants||[]).length?g.variants.reduce((a,v)=>a+Number(v.stock||0),0):Number(g.stock||0);
+function gifts(){
+ const red=db.giftRedemptions.slice().reverse();
+ return `<h2>Gifts &amp; Points Rewards</h2><div class="card"><div class="row"><button class="btn p" onclick="editGift()">+ New gift</button><button class="btn" onclick="go('cust')">Customers &amp; points</button></div><p class="mut">Gift rewards have a separate stock catalogue from regular POS products. Points are deducted only after a confirmed cloud redemption.</p>
+ ${tbl(['Gift','Points','Stock','Variants','Active','Actions'],db.gifts.map(g=>[esc(g.name),g.points,giftQty(g),(g.variants||[]).map(v=>`${esc(v.name)}: ${v.points} pts / ${v.stock} in stock`).join('<br>')||'—',g.active===false?'No':'Yes',`<button class="btn" onclick="editGift(${g.id})">Edit</button> <button class="btn" onclick="openGiftClaim(${g.id})">Redeem</button> <button class="btn d" onclick="deleteGift(${g.id})">Remove</button>`]))}</div>
+ <div class="card"><h3>Redemption history</h3>${tbl(['When','Member','Gift','Variant','Points','Status','Reference'],red.map(r=>[esc(r.createdAt||r.date),esc(db.customers.find(c=>String(c.id)===String(r.customerId))?.name||'Unknown'),esc(r.giftName),esc(r.variantName||'—'),r.points,esc(r.status||'Completed'),esc(r.requestId)]))}</div>`;
+}
+function editGift(id){const g=db.gifts.find(x=>x.id===id),v=g||{name:'',points:100,stock:0,active:true,variants:[]};
+ $('#modal').innerHTML=`<div class="box product-editor"><h3>${g?'Edit':'Add'} gift</h3><label>Gift name<input id="gift-name" value="${esc(v.name)}"></label><div class="grid2"><label>Base points cost<input id="gift-points" type="number" min="1" step="1" value="${esc(v.points)}"></label><label>Base stock<input id="gift-stock" type="number" min="0" step="1" value="${esc(v.stock)}"></label></div><label><input type="checkbox" id="gift-active" ${v.active!==false?'checked':''}> Available for redemption</label><h3>Variants</h3><div id="gift-variants"></div><div class="row"><button class="btn" onclick="addGiftVariant()">+ Add variant</button><button class="btn p" onclick="saveGift(${g?g.id:'null'})">Save gift</button><button class="btn" onclick="closeM()">Close</button></div></div>`;
+ $('#modal').style.display='flex';(v.variants||[]).forEach(addGiftVariant);
+}
+function addGiftVariant(v={}){const wrap=$('#gift-variants');if(!wrap)return;const div=document.createElement('div');div.className='variant-entry';div.dataset.id=v.id??'';div.innerHTML=`<div class="variant-fields"><label>Name<input class="gv-name" value="${esc(v.name||'')}"></label><label>Points<input class="gv-points" type="number" step="1" min="1" value="${esc(v.points??100)}"></label><label>Stock<input class="gv-stock" type="number" step="1" min="0" value="${esc(v.stock??0)}"></label><button class="btn d" onclick="this.closest('.variant-entry').remove()">Remove</button></div>`;wrap.appendChild(div);}
+function saveGift(id){const old=db.gifts.find(g=>g.id===id),name=$('#gift-name').value.trim(),points=Number($('#gift-points').value),stock=Number($('#gift-stock').value);if(!name||!Number.isSafeInteger(points)||points<1||!Number.isSafeInteger(stock)||stock<0)return alert('Enter a gift name, positive whole points and valid stock');const variants=[],names=new Set();for(const row of document.querySelectorAll('#gift-variants .variant-entry')){const n=row.querySelector('.gv-name').value.trim(),p=Number(row.querySelector('.gv-points').value),q=Number(row.querySelector('.gv-stock').value);if(!n||names.has(n.toLowerCase())||!Number.isSafeInteger(p)||p<1||!Number.isSafeInteger(q)||q<0)return alert('Check gift variants for invalid or duplicate names/values');names.add(n.toLowerCase());variants.push({id:row.dataset.id?Number(row.dataset.id):uid()+variants.length,name:n,points:p,stock:q});}
+ if(old){const removed=(old.variants||[]).filter(v=>!variants.some(n=>String(n.id)===String(v.id)));if(removed.some(v=>db.giftRedemptions.some(r=>String(r.giftId)===String(id)&&String(r.variantId)===String(v.id))))return alert('Cannot remove a variant used in past redemptions. Disable the gift instead.');Object.assign(old,{name,points,stock,variants,active:$('#gift-active').checked});}else db.gifts.push({id:uid(),name,points,stock,variants,active:$('#gift-active').checked});save();closeM();go('gifts');}
+function deleteGift(id){if(db.giftRedemptions.some(r=>String(r.giftId)===String(id)))return alert('This gift has redemption history. Disable it instead of deleting.');if(!confirm('Remove gift?'))return;db.gifts=db.gifts.filter(g=>g.id!==id);save();go('gifts');}
+function openGiftClaim(id){const gift=db.gifts.find(g=>g.id===id);if(!gift)return;$('#modal').innerHTML=`<div class="box"><h3>Redeem: ${esc(gift.name)}</h3><label>Member<select id="claim-member"><option value="">Select customer</option>${db.customers.map(c=>`<option value="${esc(c.id)}">${esc(c.name)} · ${customerPoints(c)} points</option>`).join('')}</select></label><label>Gift option<select id="claim-variant">${(gift.variants||[]).length?gift.variants.map(v=>`<option value="${esc(v.id)}">${esc(v.name)} · ${v.points} points · ${v.stock} left</option>`).join(''):`<option value="">Base gift · ${gift.points} points · ${gift.stock} left</option>`}</select></label><p class="mut">Redemption is checked and committed atomically by Supabase.</p><div class="row"><button class="btn p" id="claim-submit" onclick="claimGift(${id})">Confirm redemption</button><button class="btn" onclick="closeM()">Cancel</button></div></div>`;$('#modal').style.display='flex';}
+let giftClaimBusy=false, pendingGiftClaim=null;
+async function claimGift(id){if(giftClaimBusy)return;const customerId=$('#claim-member').value,variantId=$('#claim-variant').value;if(!customerId)return alert('Select a customer');if(!cloudReady||cloudFailed)return alert('Cloud is not ready');giftClaimBusy=true;const b=$('#claim-submit');b.disabled=true;try{await cloudQueue;const signature=[id,customerId,variantId].join(':');if(pendingGiftClaim&&pendingGiftClaim.signature!==signature)throw new Error('Previous gift redemption is unresolved. Check history and reload before selecting another redemption.');if(!pendingGiftClaim)pendingGiftClaim={signature,requestId:crypto.randomUUID()};const requestId=pendingGiftClaim.requestId,{data,error}=await sb.rpc('tt_redeem_gift',{expected_version:cloudVersion,claim:{requestId,giftId:id,variantId:variantId||null,customerId,date:today()}});if(error)throw error;const {data:latest,error:readError}=await sb.from('business_state').select('payload,version').eq('user_id',cloudUser.id).single();if(readError)throw readError;db=upgradeDb(latest.payload);cloudVersion=latest.version;pendingGiftClaim=null;closeM();go('gifts');toast('Gift redeemed and points deducted');}catch(e){alert('Redemption not confirmed: '+e.message+'\nRefresh cloud data and inspect the redemption history before attempting again.');}finally{giftClaimBusy=false;if(b.isConnected)b.disabled=false;}}
+/* ---------- Public and member-specific POS vouchers ---------- */
+function vouchers(){return `<h2>Voucher Management</h2><div class="card"><div class="row"><button class="btn p" onclick="editVoucher()">+ Create voucher</button></div><p class="mut">General vouchers are offered to every POS checkout. Member vouchers are usable only when that customer is selected. Codes are validated again by Supabase at checkout.</p>${tbl(['Code','Type','Value','Audience','Validity','Usage','Status','Actions'],db.vouchers.map(v=>{const uses=db.orders.filter(o=>o.status==='Completed'&&String(o.voucherId)===String(v.id)).length;return [esc(v.code),v.type==='percent'?'Percentage':'Fixed RM',v.type==='percent'?esc(v.value)+'%':RM(v.value),v.scope==='member'?esc(db.customers.find(c=>String(c.id)===String(v.customerId))?.name||'Deleted member'):'General POS',esc((v.starts||'Any')+' — '+(v.expires||'No expiry')),`${uses}${v.limit?'/'+v.limit:''}`,v.active===false?'Disabled':'Active',`<button class="btn" onclick="editVoucher(${v.id})">Edit</button> <button class="btn d" onclick="deleteVoucher(${v.id})">Remove</button>`];}))}</div>`;}
+function editVoucher(id){const v=db.vouchers.find(x=>x.id===id)||{code:'',type:'fixed',value:5,scope:'public',customerId:'',active:true,limit:0,perCustomerLimit:0,starts:'',expires:''};$('#modal').innerHTML=`<div class="box"><h3>${id?'Edit':'New'} POS voucher</h3><label>Voucher code<input id="vc-code" value="${esc(v.code)}" maxlength="40" placeholder="WELCOME5"></label><div class="grid2"><label>Discount type<select id="vc-type"><option value="fixed" ${v.type==='fixed'?'selected':''}>Fixed RM</option><option value="percent" ${v.type==='percent'?'selected':''}>Percentage</option></select></label><label>Value<input id="vc-value" type="number" step="0.01" min="0" value="${esc(v.value)}"></label><label>Audience<select id="vc-scope"><option value="public" ${v.scope==='public'?'selected':''}>General POS</option><option value="member" ${v.scope==='member'?'selected':''}>One member only</option></select></label><label>Assigned member<select id="vc-customer"><option value="">— None —</option>${db.customers.map(c=>`<option value="${esc(c.id)}" ${String(c.id)===String(v.customerId)?'selected':''}>${esc(c.name)}</option>`).join('')}</select></label><label>Starts<input id="vc-start" type="date" value="${esc(v.starts||'')}"></label><label>Expires<input id="vc-expires" type="date" value="${esc(v.expires||'')}"></label><label>Max total uses (0 unlimited)<input id="vc-limit" type="number" min="0" step="1" value="${esc(v.limit||0)}"></label><label>Max uses per customer (0 unlimited)<input id="vc-per" type="number" min="0" step="1" value="${esc(v.perCustomerLimit||0)}"></label></div><label><input type="checkbox" id="vc-active" ${v.active!==false?'checked':''}> Voucher enabled</label><div class="row"><button class="btn p" onclick="saveVoucher(${id||'null'})">Save voucher</button><button class="btn" onclick="closeM()">Cancel</button></div></div>`;$('#modal').style.display='flex';}
+function saveVoucher(id){const code=$('#vc-code').value.trim().toUpperCase(),type=$('#vc-type').value,value=Number($('#vc-value').value),scope=$('#vc-scope').value,customerId=$('#vc-customer').value,starts=$('#vc-start').value,expires=$('#vc-expires').value,limit=Number($('#vc-limit').value),perCustomerLimit=Number($('#vc-per').value);if(!/^[A-Z0-9_-]{3,40}$/.test(code)||!Number.isFinite(value)||value<=0||(type==='percent'&&value>100)||!Number.isSafeInteger(limit)||limit<0||!Number.isSafeInteger(perCustomerLimit)||perCustomerLimit<0||(scope==='member'&&!customerId)||(starts&&expires&&starts>expires))return alert('Invalid voucher. Use a 3–40 character code, a positive discount and valid limits/dates.');if(db.vouchers.some(v=>v.code.toUpperCase()===code&&String(v.id)!==String(id)))return alert('Voucher code already exists');const payload={code,type,value,scope,customerId:scope==='member'?customerId:null,starts,expires,limit,perCustomerLimit,active:$('#vc-active').checked},old=db.vouchers.find(v=>v.id===id);if(old)Object.assign(old,payload);else db.vouchers.push({id:uid(),...payload});save();closeM();go('vouchers');}
+function deleteVoucher(id){if(db.orders.some(o=>String(o.voucherId)===String(id)))return alert('Voucher has transaction history; disable it instead of deleting.');if(!confirm('Remove this voucher?'))return;db.vouchers=db.vouchers.filter(v=>v.id!==id);save();go('vouchers');}
 
 /* ---------- reports ---------- */
 let from = today().slice(0, 8) + '01', to = today(), reportSeller = 'all';
