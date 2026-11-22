@@ -198,15 +198,42 @@ tbody tr:has(.ck:checked){background:color-mix(in srgb,var(--pri) 15%,transparen
 
 <script>
 /* ===== SUPABASE CONFIG: fill both values before opening the app ===== */
-const SUPABASE_URL = 'https://hntdmbezophnnqjycxns.supabase.co';      // e.g. https://xxxx.supabase.co
-const SUPABASE_KEY = 'sb_publishable_Nn7dC0a9TIq7P6Pnwb7y7A_g0m0PnCW';      // anon public key
+const SUPABASE_URL = '';      // e.g. https://xxxx.supabase.co
+const SUPABASE_KEY = '';      // anon public key
 /* Public anon/publishable key only. NEVER paste the Supabase service_role key. */
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const RM = n => 'RM ' + Number(n || 0).toFixed(2);
 const today = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
-const uid = () => Date.now() * 1000 + Math.floor(Math.random() * 1000); // safe integer, low collision risk across devices
+// ID values must stay numeric because the original UI embeds them in button handlers.
+// The previous Date.now()+random(0..999) scheme could collide on fast CSV imports.
+let lastGeneratedId = 0;
+function uid() {
+  const used = new Set();
+  if (typeof db !== 'undefined' && db) {
+    for (const key of ['products','orders','customers','inventory','cash','staff','gifts','giftRedemptions','vouchers']) {
+      for (const item of db[key] || []) {
+        if (item.id != null) used.add(String(item.id));
+        for (const variant of item.variants || []) if (variant.id != null) used.add(String(variant.id));
+      }
+    }
+  }
+  let candidate = Math.max(Date.now() * 1000, lastGeneratedId + 1);
+  while (used.has(String(candidate))) candidate++;
+  if (!Number.isSafeInteger(candidate)) throw new Error('Cannot generate a safe ID');
+  lastGeneratedId = candidate;
+  return candidate;
+}
+function duplicateCustomerIds(data) {
+  const seen = new Set(), duplicates = new Set();
+  for (const customer of data.customers || []) {
+    const id = customer.id == null ? '' : String(customer.id);
+    if (!id || seen.has(id)) duplicates.add(id || '(missing)');
+    seen.add(id);
+  }
+  return [...duplicates];
+}
 const K = 'shoppos_db'; // Legacy browser-only data, offered for one-time migration.
 const emptyDb = () => ({products:[],orders:[],customers:[],inventory:[],cash:[],staff:[],gifts:[],giftRedemptions:[],vouchers:[]});
 function upgradeDb(raw) {
@@ -242,6 +269,16 @@ function save() {
   }
   // Serialize optimistic writes. The SQL function also updates normalized projections atomically.
   const snapshot = JSON.parse(JSON.stringify(db));
+  const duplicates = duplicateCustomerIds(snapshot);
+  if (duplicates.length) {
+    // Never silently reassign an existing customer's ID: orders/gift redemptions may link to it.
+    try { localStorage.setItem('tt_cloud_recovery', JSON.stringify(snapshot)); } catch (e) { console.error('Recovery storage failed',e); }
+    cloudFailed = true;
+    status('Cloud: duplicate customer IDs — export backup', true);
+    alert('Customer IDs are duplicated: ' + duplicates.slice(0, 5).join(', ') +
+      '. Save blocked to protect order history. Export the unsaved recovery JSON and resolve duplicates before reloading.');
+    return Promise.resolve(false);
+  }
   status('Cloud: saving…');
   cloudQueue = cloudQueue.then(async () => {
     if (cloudFailed || !cloudReady) return false;
