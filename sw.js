@@ -1,5 +1,5 @@
 // Two Tales PWA: online-only business transactions, offline information page.
-const CACHE = 'two-tales-pwa-assets-v3';
+const CACHE = 'two-tales-pwa-assets-v3-1';
 const ASSETS = ['./offline.html','./manifest.webmanifest','./icons/icon-192.png','./icons/icon-512.png'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting()));

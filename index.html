@@ -198,8 +198,8 @@ tbody tr:has(.ck:checked){background:color-mix(in srgb,var(--pri) 15%,transparen
 
 <script>
 /* ===== SUPABASE CONFIG: fill both values before opening the app ===== */
-const SUPABASE_URL = 'https://hntdmbezophnnqjycxns.supabase.co';      // e.g. https://xxxx.supabase.co
-const SUPABASE_KEY = 'sb_publishable_Nn7dC0a9TIq7P6Pnwb7y7A_g0m0PnCW';      // anon public key
+const SUPABASE_URL = '';      // e.g. https://xxxx.supabase.co
+const SUPABASE_KEY = '';      // anon public key
 /* Public anon/publishable key only. NEVER paste the Supabase service_role key. */
 
 const $ = s => document.querySelector(s);
@@ -235,11 +235,11 @@ function duplicateCustomerIds(data) {
   return [...duplicates];
 }
 const K = 'shoppos_db'; // Legacy browser-only data, offered for one-time migration.
-const emptyDb = () => ({products:[],orders:[],customers:[],inventory:[],cash:[],staff:[],gifts:[],giftRedemptions:[],vouchers:[]});
+const emptyDb = () => ({products:[],orders:[],customers:[],inventory:[],cash:[],staff:[],gifts:[],giftRedemptions:[],vouchers:[],voucherClaims:[]});
 function upgradeDb(raw) {
   const value = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
   const result = {...emptyDb(),...value};
-  for (const a of ['products','orders','customers','inventory','cash','staff','gifts','giftRedemptions','vouchers'])
+  for (const a of ['products','orders','customers','inventory','cash','staff','gifts','giftRedemptions','vouchers','voucherClaims'])
     if (!Array.isArray(result[a])) result[a] = [];
   result.gifts.forEach(g => { if (!Array.isArray(g.variants)) g.variants=[]; });
   result.products.forEach(p => {
@@ -512,7 +512,8 @@ function recentDays(n) {
     list.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`); }
   return list;
 }
-function analyticsStats(orders) {
+function analyticsStats(orders,startDate=null,endDate=null) {
+  const inPeriod=r=>{const d=String(r.date||r.createdAt||'').slice(0,10);return d && (!startDate||d>=startDate)&&(!endDate||d<=endDate);};
   const os=orders.filter(sold), collected=money(os.reduce((a,o)=>a+Number(o.paid||0),0));
   const sales=money(os.reduce((a,o)=>a+Number(o.total||0),0));
   const discounts=money(os.reduce((a,o)=>a+Number(o.discount||0),0));
@@ -522,7 +523,7 @@ function analyticsStats(orders) {
   const members=Object.keys(counts).length, repeating=Object.values(counts).filter(n=>n>1).length;
   return {orders:os.length,collected,sales,discounts,cost,gross:money(sales-cost),
     aov:os.length?money(sales/os.length):0,outstanding,repeatRate:members?money(repeating/members*100):0,
-    pointsIssued:os.reduce((a,o)=>a+earnedPoints(o),0),pointsRedeemed:os.reduce((a,o)=>a+(o.status==='Completed'?Number(o.redeemedPoints)||0:0),0)};
+    pointsIssued:os.reduce((a,o)=>a+earnedPoints(o),0),pointsRedeemed:os.reduce((a,o)=>a+(o.status==='Completed'?Number(o.redeemedPoints)||0:0),0)+db.giftRedemptions.filter(r=>r.status!=='Cancelled'&&inPeriod(r)).reduce((a,r)=>a+(Number(r.points)||0),0)+db.voucherClaims.filter(r=>r.status!=='Cancelled'&&inPeriod(r)).reduce((a,r)=>a+(Number(r.points)||0),0)};
 }
 function sparkBars(days) {
  const max=Math.max(1,...days.map(d=>d.value));
@@ -531,7 +532,7 @@ function sparkBars(days) {
 function analytics() {
  const dates=recentDays(analyticsDays), first=dates[0], last=dates.at(-1);
  const all=db.orders.filter(o=>o.date>=first&&o.date<=last);
- const os=all.filter(sold), a=analyticsStats(all);
+ const os=all.filter(sold), a=analyticsStats(all,first,last);
  const days=dates.map(d=>({date:d,value:money(os.filter(o=>o.date===d).reduce((sum,o)=>sum+Number(o.paid||0),0))}));
  const methods=['Cash','QR PAY'];
  const payment=methods.map(name=>({name,total:money(os.filter(o=>o.payment===name).reduce((sum,o)=>sum+Number(o.paid||0),0))}));
@@ -583,7 +584,7 @@ function dash() {
   const os = db.orders.filter(sold), t = today();
   const low = db.inventory.filter(i => i.stock <= i.reorder).length;
   const last30 = recentDays(30), days = last30.map(d => ({date:d, value:money(os.filter(o=>o.date===d).reduce((a,o)=>a+Number(o.paid||0),0))}));
-  const p = analyticsStats(os.filter(o => last30.includes(o.date)));
+  const p = analyticsStats(os.filter(o => last30.includes(o.date)),last30[0],last30.at(-1));
   return `<h2>Dashboard</h2><div class="cards">
   <div class="card">Today's sales (paid)<b>${RM(os.filter(o => o.date === t).reduce((a, o) => a + Number(o.paid||0), 0))}</b></div>
   <div class="card">Recorded sales value<b>${RM(os.reduce((a, o) => a + Number(o.total||0), 0))}</b></div>
@@ -597,17 +598,30 @@ function dash() {
 
 /* ---------- point of sales ---------- */
 let cart = [], pm = 'Cash', ctype = 'Walk-in', cmem = '', tender = '';
-let discountType = 'fixed', discountValue = '0', redeemPoints = '0', qrConfirmed = false;
+let discountType = 'fixed', discountValue = '0', qrConfirmed = false;
 let saleNotes = '', posError = '', lastSaleId = null, retrySale = null;
 const money = n => Math.round((Number(n)||0)*100 + 1e-7)/100;
 const sub = () => money(cart.reduce((a,c)=>a+c.price*c.qty,0));
 const discountAmount = () => discountType === 'percent' ? money(sub()*Math.min(100,Math.max(0,Number(discountValue)||0))/100) : Math.max(0,Number(discountValue)||0);
-const voucherDiscount=()=>{const v=db.vouchers.find(x=>String(x.id)===String(selectedVoucher));return v&&voucherAvailable(v,db.customers.find(c=>String(c.id)===String(cmem)))?Math.min(Math.max(0,sub()-discountAmount()),v.type==='percent'?money((sub()-discountAmount())*Number(v.value)/100):Number(v.value)||0):0;};
-const payable = () => money(Math.max(0,sub()-discountAmount()-voucherDiscount()-Math.max(0,Number(redeemPoints)||0)*.1));
-let selectedVoucher='';
-const earnedPoints = o => o.status === 'Completed' && o.loyaltyEligible && o.customerId != null ? Math.floor((Number(o.paid)||0)/10) : 0;
-const customerPoints = c => (Number(c.pointsOpening)||0) + db.orders.filter(o => belongsToCustomer(o,c) && o.status === 'Completed').reduce((a,o)=>a+earnedPoints(o)-(Number(o.redeemedPoints)||0),0)-db.giftRedemptions.filter(r=>String(r.customerId)===String(c.id)&&r.status!=='Cancelled').reduce((a,r)=>a+(Number(r.points)||0),0);
-function voucherAvailable(v,customer){if(!v)return false;const now=today(), used=db.orders.filter(o=>o.status==='Completed'&&String(o.voucherId)===String(v.id));return v.active!==false&&(!v.starts||v.starts<=now)&&(!v.expires||v.expires>=now)&&(!Number(v.limit)||used.length<Number(v.limit))&&(v.scope==='public'||(customer&&String(v.customerId)===String(customer.id)))&&(!Number(v.perCustomerLimit)||!customer||used.filter(o=>String(o.customerId)===String(customer.id)).length<Number(v.perCustomerLimit));}
+const voucherDiscount=()=>{const v=db.vouchers.find(x=>String(x.id)===String(selectedVoucher));return v&&voucherAvailable(v,db.customers.find(c=>String(c.id)===String(cmem)),selectedVoucherClaim)?Math.min(Math.max(0,sub()-discountAmount()),v.type==='percent'?money((sub()-discountAmount())*Number(v.value)/100):Number(v.value)||0):0;};
+const payable = () => money(Math.max(0,sub()-discountAmount()-voucherDiscount()));
+let selectedVoucher='', selectedVoucherClaim='';
+// Preserve historic 1-per-RM10 earnings for old orders. New POS orders record pointsEarned at 1-per-RM1.
+const earnedPoints = o => o.status === 'Completed' && o.loyaltyEligible && o.customerId != null ? (Number.isSafeInteger(Number(o.pointsEarned)) && o.pointsEarned != null ? Number(o.pointsEarned) : Math.floor((Number(o.paid)||0)/10)) : 0;
+const customerPoints = c => (Number(c.pointsOpening)||0) + db.orders.filter(o => belongsToCustomer(o,c) && o.status === 'Completed').reduce((a,o)=>a+earnedPoints(o)-(Number(o.redeemedPoints)||0),0)-db.giftRedemptions.filter(r=>String(r.customerId)===String(c.id)&&r.status!=='Cancelled').reduce((a,r)=>a+(Number(r.points)||0),0)-db.voucherClaims.filter(r=>String(r.customerId)===String(c.id)&&r.status!=='Cancelled').reduce((a,r)=>a+(Number(r.points)||0),0);
+function voucherAvailable(v,customer,claimId=''){
+  if(!v)return false;
+  const now=today(),used=db.orders.filter(o=>o.status==='Completed'&&String(o.voucherId)===String(v.id));
+  const valid=v.active!==false&&(!v.starts||v.starts<=now)&&(!v.expires||v.expires>=now)&&(!Number(v.limit)||used.length<Number(v.limit))&&(v.scope==='public'||(customer&&String(v.customerId)===String(customer.id)))&&(!Number(v.perCustomerLimit)||!customer||used.filter(o=>String(o.customerId)===String(customer.id)).length<Number(v.perCustomerLimit));
+  if (!valid) return false;
+  if (Number(v.pointsCost||0)>0) return Boolean(customer && claimId && db.voucherClaims.some(x=>x.requestId===claimId&&String(x.voucherId)===String(v.id)&&String(x.customerId)===String(customer.id)&&x.status==='Claimed'));
+  return !claimId;
+}
+function availableVoucherOptions(customer){
+  return db.vouchers.flatMap(v=>Number(v.pointsCost||0)>0 ? (!customer ? [] : db.voucherClaims.filter(x=>String(x.customerId)===String(customer.id)&&String(x.voucherId)===String(v.id)&&x.status==='Claimed'&&voucherAvailable(v,customer,x.requestId)).map(x=>({v,claimId:x.requestId}))) : (voucherAvailable(v,customer)?[{v,claimId:''}]:[]));
+}
+function chooseVoucher(value){const [id,ref='']=value.split('::');selectedVoucher=id;selectedVoucherClaim=ref;go('pos');}
+
 function pos() {
   const due=payable(), chg=(parseFloat(tender)||0)-due;
   const customer=db.customers.find(c=>String(c.id)===String(cmem));
@@ -622,25 +636,24 @@ function pos() {
   <div class="seller-panel"><strong>Sales staff on duty</strong><div class="mut" style="font-size:12px">Required for every checkout.</div>
   <label>Seller<select onchange="changeSeller(this.value)"><option value="">— Select sales staff —</option>${sellerOptions().map(x=>`<option value="${esc(x.id)}" ${String(activeSeller)===x.id?'selected':''}>${esc(x.name)}</option>`).join('')}</select></label>
   ${!db.staff.some(x=>x.status==='Active')?`<p class="mut">No active staff. <button class="btn" onclick="go('staff')">Register staff</button></p>`:''}</div>
-  <label>Customer<select onchange="ctype=this.value;cmem='';redeemPoints='0';selectedVoucher='';go('pos')"><option ${ctype==='Walk-in'?'selected':''}>Walk-in</option><option ${ctype==='Member'?'selected':''}>Member</option></select></label>
-  ${ctype==='Member'?`<label>Select member<select onchange="cmem=this.value;redeemPoints='0';selectedVoucher='';go('pos')"><option value="">— Choose customer —</option>${db.customers.map(c=>`<option value="${esc(c.id)}" ${String(c.id)===String(cmem)?'selected':''}>${esc(c.name)}${c.phone?' · '+esc(c.phone):''}</option>`).join('')}</select></label>
-  ${customer?`<div class="loyalty-panel">★ ${esc(customer.name)} · <b>${customerPoints(customer)}</b> points available <small>1 point = RM0.10 · Earn 1 point per RM10 paid</small></div>`:''}`:''}
+  <label>Customer<select onchange="ctype=this.value;cmem='';selectedVoucher='';selectedVoucherClaim='';go('pos')"><option ${ctype==='Walk-in'?'selected':''}>Walk-in</option><option ${ctype==='Member'?'selected':''}>Member</option></select></label>
+  ${ctype==='Member'?`<label>Select member<select onchange="cmem=this.value;selectedVoucher='';selectedVoucherClaim='';go('pos')"><option value="">— Choose customer —</option>${db.customers.map(c=>`<option value="${esc(c.id)}" ${String(c.id)===String(cmem)?'selected':''}>${esc(c.name)}${c.phone?' · '+esc(c.phone):''}</option>`).join('')}</select></label>
+  ${customer?`<div class="loyalty-panel">★ ${esc(customer.name)} · <b>${customerPoints(customer)}</b> points available <small>Earn 1 point per RM1 paid · Redeem for gifts or reward vouchers (not cash)</small></div>`:''}`:''}
   ${tbl(['Item','Qty','Total',''],cart.map((c,i)=>[esc(c.name),`<button class="btn" onclick="qty(${i},-1)">−</button> ${c.qty} <button class="btn" onclick="qty(${i},1)">+</button>`,RM(c.price*c.qty),`<button class="btn d" onclick="if(retrySale){posFailure('Check the pending checkout first')}else{cart.splice(${i},1);go('pos')}">×</button>`]))}
   <div class="bill"><div><span>Subtotal</span><strong>${RM(sub())}</strong></div>
   <div class="row" style="align-items:end"><label style="flex:1">Discount<select onchange="discountType=this.value;go('pos')"><option value="fixed" ${discountType==='fixed'?'selected':''}>RM fixed</option><option value="percent" ${discountType==='percent'?'selected':''}>Percent %</option></select></label><label style="flex:1">Value<input type="number" min="0" step="0.01" value="${esc(discountValue)}" onchange="discountValue=this.value;go('pos')"></label></div>
   <div><span>Discount</span><strong>−${RM(discountAmount())}</strong></div>
-  <label>Voucher<select onchange="selectedVoucher=this.value;redeemPoints='0';go('pos')"><option value="">— No voucher —</option>${db.vouchers.filter(v=>voucherAvailable(v,customer)).map(v=>`<option value="${esc(v.id)}" ${String(selectedVoucher)===String(v.id)?'selected':''}>${esc(v.code)} — ${v.type==='percent'?esc(v.value)+'%':RM(v.value)}</option>`).join('')}</select></label>
+  <label>Voucher<select onchange="chooseVoucher(this.value)"><option value="">— No voucher —</option>${availableVoucherOptions(customer).map(({v,claimId})=>`<option value="${esc(String(v.id)+(claimId?'::'+claimId:''))}" ${String(selectedVoucher)===String(v.id)&&selectedVoucherClaim===claimId?'selected':''}>${esc(v.code)} — ${v.type==='percent'?esc(v.value)+'%':RM(v.value)}${claimId?' · Points reward':''}</option>`).join('')}</select></label>
   <div><span>Voucher discount</span><strong>−${RM(voucherDiscount())}</strong></div>
-  ${customer?`<label>Redeem points (whole points, max ${Math.min(Math.max(0,customerPoints(customer)),Math.floor(Math.max(0,sub()-discountAmount()-voucherDiscount())*10))})<input type="number" min="0" step="1" value="${esc(redeemPoints)}" onchange="redeemPoints=this.value;go('pos')"></label><div><span>Points credit</span><strong>−${RM((Number(redeemPoints)||0)*.1)}</strong></div>`:''}
   <div class="grand"><span>Total payable</span><strong>${RM(due)}</strong></div>
-  ${customer?`<p class="mut" style="font-size:12px">Estimated points earned: ${Math.floor(due/10)} (after payment is recorded)</p>`:''}</div>
+  ${customer?`<p class="mut" style="font-size:12px">Estimated points earned: ${Math.floor(due)} (1 point per RM1 paid; whole points)</p>`:''}</div>
   <label>Payment<select onchange="pm=this.value;qrConfirmed=false;go('pos')"><option ${pm==='Cash'?'selected':''}>Cash</option><option ${pm==='QR PAY'?'selected':''}>QR PAY</option></select></label>
   ${pm==='Cash'?`<label>Cash received<input type="number" min="0" step="0.01" value="${esc(tender)}" oninput="tender=this.value;$('#chg').textContent=RM((parseFloat(tender)||0)-payable())"></label><p>Change: <b id="chg">${RM(chg)}</b></p>`:
     `<img class="qr" src="./qr.png" onerror="this.style.display='none'" alt="Optional merchant QR code"><p class="mut">Place qr.png in your GitHub repository to show the payment QR.</p><label><input type="checkbox" class="ck" style="display:inline-block;vertical-align:middle" ${qrConfirmed?'checked':''} onchange="qrConfirmed=this.checked"> I have verified the QR payment was received</label>`}
   <label>Receipt note (optional)<textarea rows="2" maxlength="1000" oninput="saleNotes=this.value">${esc(saleNotes)}</textarea></label>
   ${posError?`<p class="error-panel" role="alert">${esc(posError)}</p>`:''}
   <div class="row"><button class="btn p" style="flex:1" id="checkout-btn" ${checkoutBusy?'disabled':''} onclick="checkout()">${checkoutBusy?'Processing…':'✓ Complete sale'}</button>${lastSaleId?`<button class="btn" onclick="printReceipt(${lastSaleId})">Last receipt</button>`:''}</div>
-  <p class="mut" style="font-size:11px">Stock and loyalty points are verified at Supabase before the order is committed. An uncertain connection can be retried using the same transaction reference.</p></div></div>`;
+  <p class="mut" style="font-size:11px">Stock, voucher eligibility and loyalty awards are verified at Supabase before the order is committed. An uncertain connection can be retried using the same transaction reference.</p></div></div>`;
 }
 function filterPosProducts(q) {const text=q.trim().toLowerCase();document.querySelectorAll('#app .pg .pb').forEach(el=>{el.hidden=!el.dataset.product.includes(text);});}
 // Product variants have independent prices and stock, while products without variants use base stock.
@@ -747,16 +760,14 @@ async function checkout() {
   const member=ctype==='Member'?db.customers.find(c=>String(c.id)===String(cmem)):null;
   if (ctype==='Member' && !member) return posFailure('Select a valid customer.');
   if (discountType==='percent' && Number(discountValue)>100 || !Number.isFinite(Number(discountValue)) || Number(discountValue)<0 || discountAmount()>sub()) return posFailure('Discount must be within the subtotal (or 0–100%).');
-  if(selectedVoucher&&!voucherAvailable(db.vouchers.find(v=>String(v.id)===String(selectedVoucher)),member)) return posFailure('Voucher is no longer available.');
-  const r=Number(redeemPoints);
-  if (!Number.isSafeInteger(r) || r<0 || r>(member?customerPoints(member):0) || r/10>sub()-discountAmount()-voucherDiscount()+0.001) return posFailure('Invalid points redemption or insufficient balance.');
+  if(selectedVoucher&&!voucherAvailable(db.vouchers.find(v=>String(v.id)===String(selectedVoucher)),member,selectedVoucherClaim)) return posFailure('Voucher is no longer available.');
   if (pm==='Cash' && (!tender.trim() || !Number.isFinite(Number(tender)) || Number(tender)<payable())) return posFailure('Enter cash received equal to or above the total.');
   if (pm==='QR PAY' && !qrConfirmed) return posFailure('Verify the QR payment before checkout.');
   if (cloudFailed || !cloudReady) return posFailure('Cloud is disconnected. No sale has been confirmed.');
   // Preserve the request ID while retrying an uncertain response to avoid duplicate charges.
   if (!retrySale) retrySale = {requestId: (crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random()}-${Math.random()}`),orderId:uid()};
   let sale={requestId:retrySale.requestId,orderId:retrySale.orderId, sellerId:seller.id,customerId:member?member.id:null,items:cart.map(c=>({productId:c.productId,variantId:c.variantId,qty:c.qty,price:c.price})),
-    date:today(), payment:pm,discountType,discountValue:Number(discountValue)||0,voucherId:selectedVoucher||null,redeemPoints:r,cashReceived:Number(tender)||0,qrConfirmed,notes:saleNotes};
+    date:today(), payment:pm,discountType,discountValue:Number(discountValue)||0,voucherId:selectedVoucher||null,voucherClaimId:selectedVoucherClaim||null,redeemPoints:0,cashReceived:Number(tender)||0,qrConfirmed,notes:saleNotes};
   if(retrySale.payload) sale=retrySale.payload; else retrySale.payload=sale;
   checkoutBusy=true; posError='';
   const button=$('#checkout-btn'); if(button){button.disabled=true;button.textContent='Verifying and saving…';}
@@ -771,7 +782,7 @@ async function checkout() {
     const {data:latest,error:readError}=await sb.from('business_state').select('payload,version').eq('user_id',cloudUser.id).single();
     if(readError) {cloudVersion=data.version; throw new Error('Sale saved, but refresh failed. Check Orders before retrying: '+readError.message);}
     db=upgradeDb(latest.payload);cloudVersion=latest.version;
-    lastSaleId=confirmed.id; retrySale=null; cart=[];tender='';saleNotes='';redeemPoints='0';discountValue='0';selectedVoucher='';qrConfirmed=false;
+    lastSaleId=confirmed.id; retrySale=null; cart=[];tender='';saleNotes='';discountValue='0';selectedVoucher='';selectedVoucherClaim='';qrConfirmed=false;
     status('Cloud: sale saved ✓');go('pos');
     showReceipt(confirmed);
     toast(data.alreadyProcessed?'Existing transaction confirmed':'Sale #'+confirmed.no+' saved to cloud');
@@ -793,7 +804,7 @@ function receiptMarkup(o) {
   <div class="receipt-line"></div><div class="receipt-row"><span>Subtotal</span><b>${RM(s)}</b></div>
   <div class="receipt-row"><span>Discount</span><b>−${RM(o.discount)}</b></div>
   ${o.voucherCode?`<div class="receipt-row"><span>Voucher ${esc(o.voucherCode)}</span><b>−${RM(o.voucherDiscount)}</b></div>`:''}
-  <div class="receipt-row"><span>Points redeemed (${Number(o.redeemedPoints)||0})</span><b>−${RM((Number(o.redeemedPoints)||0)/10)}</b></div>
+  ${Number(o.redeemedPoints)>0?`<div class="receipt-row"><span>Legacy points discount (${Number(o.redeemedPoints)})</span><b>−${RM((Number(o.redeemedPoints)||0)/10)}</b></div>`:''}
   <div class="receipt-row grand"><span>TOTAL</span><b>${RM(o.total)}</b></div>
   <div class="receipt-row"><span>Paid</span><b>${RM(o.paid)}</b></div>
   ${o.payment==='Cash'?`<div class="receipt-row"><span>Cash received</span><b>${RM(o.tendered??o.paid)}</b></div><div class="receipt-row"><span>Change</span><b>${RM(o.change)}</b></div>`:''}
@@ -971,7 +982,7 @@ const expC = () => dl('customers.csv', ['Name,Phone,Notes,Since', ...db.customer
 const giftQty = g => (g.variants||[]).length?g.variants.reduce((a,v)=>a+Number(v.stock||0),0):Number(g.stock||0);
 function gifts(){
  const red=db.giftRedemptions.slice().reverse();
- return `<h2>Gifts &amp; Points Rewards</h2><div class="card"><div class="row"><button class="btn p" onclick="editGift()">+ New gift</button><button class="btn" onclick="go('cust')">Customers &amp; points</button></div><p class="mut">Gift rewards have a separate stock catalogue from regular POS products. Points are deducted only after a confirmed cloud redemption.</p>
+ return `<h2>Gifts &amp; Points Rewards</h2><div class="card"><div class="row"><button class="btn p" onclick="editGift()">+ New gift</button><button class="btn" onclick="go('cust')">Customers &amp; points</button></div><p class="mut">Gift rewards have separate stock from regular apparel and accessories. Only existing members can claim gifts; points are deducted after a confirmed cloud redemption.</p>
  ${tbl(['Gift','Points','Stock','Variants','Active','Actions'],db.gifts.map(g=>[esc(g.name),g.points,giftQty(g),(g.variants||[]).map(v=>`${esc(v.name)}: ${v.points} pts / ${v.stock} in stock`).join('<br>')||'—',g.active===false?'No':'Yes',`<button class="btn" onclick="editGift(${g.id})">Edit</button> <button class="btn" onclick="openGiftClaim(${g.id})">Redeem</button> <button class="btn d" onclick="deleteGift(${g.id})">Remove</button>`]))}</div>
  <div class="card"><h3>Redemption history</h3>${tbl(['When','Member','Gift','Variant','Points','Status','Reference'],red.map(r=>[esc(r.createdAt||r.date),esc(db.customers.find(c=>String(c.id)===String(r.customerId))?.name||'Unknown'),esc(r.giftName),esc(r.variantName||'—'),r.points,esc(r.status||'Completed'),esc(r.requestId)]))}</div>`;
 }
@@ -986,11 +997,22 @@ function deleteGift(id){if(db.giftRedemptions.some(r=>String(r.giftId)===String(
 function openGiftClaim(id){const gift=db.gifts.find(g=>g.id===id);if(!gift)return;$('#modal').innerHTML=`<div class="box"><h3>Redeem: ${esc(gift.name)}</h3><label>Member<select id="claim-member"><option value="">Select customer</option>${db.customers.map(c=>`<option value="${esc(c.id)}">${esc(c.name)} · ${customerPoints(c)} points</option>`).join('')}</select></label><label>Gift option<select id="claim-variant">${(gift.variants||[]).length?gift.variants.map(v=>`<option value="${esc(v.id)}">${esc(v.name)} · ${v.points} points · ${v.stock} left</option>`).join(''):`<option value="">Base gift · ${gift.points} points · ${gift.stock} left</option>`}</select></label><p class="mut">Redemption is checked and committed atomically by Supabase.</p><div class="row"><button class="btn p" id="claim-submit" onclick="claimGift(${id})">Confirm redemption</button><button class="btn" onclick="closeM()">Cancel</button></div></div>`;$('#modal').style.display='flex';}
 let giftClaimBusy=false, pendingGiftClaim=null;
 async function claimGift(id){if(giftClaimBusy)return;const customerId=$('#claim-member').value,variantId=$('#claim-variant').value;if(!customerId)return alert('Select a customer');if(!cloudReady||cloudFailed)return alert('Cloud is not ready');giftClaimBusy=true;const b=$('#claim-submit');b.disabled=true;try{await cloudQueue;const signature=[id,customerId,variantId].join(':');if(pendingGiftClaim&&pendingGiftClaim.signature!==signature)throw new Error('Previous gift redemption is unresolved. Check history and reload before selecting another redemption.');if(!pendingGiftClaim)pendingGiftClaim={signature,requestId:crypto.randomUUID()};const requestId=pendingGiftClaim.requestId,{data,error}=await sb.rpc('tt_redeem_gift',{expected_version:cloudVersion,claim:{requestId,giftId:id,variantId:variantId||null,customerId,date:today()}});if(error)throw error;const {data:latest,error:readError}=await sb.from('business_state').select('payload,version').eq('user_id',cloudUser.id).single();if(readError)throw readError;db=upgradeDb(latest.payload);cloudVersion=latest.version;pendingGiftClaim=null;closeM();go('gifts');toast('Gift redeemed and points deducted');}catch(e){alert('Redemption not confirmed: '+e.message+'\nRefresh cloud data and inspect the redemption history before attempting again.');}finally{giftClaimBusy=false;if(b.isConnected)b.disabled=false;}}
-/* ---------- Public and member-specific POS vouchers ---------- */
-function vouchers(){return `<h2>Voucher Management</h2><div class="card"><div class="row"><button class="btn p" onclick="editVoucher()">+ Create voucher</button></div><p class="mut">General vouchers are offered to every POS checkout. Member vouchers are usable only when that customer is selected. Codes are validated again by Supabase at checkout.</p>${tbl(['Code','Type','Value','Audience','Validity','Usage','Status','Actions'],db.vouchers.map(v=>{const uses=db.orders.filter(o=>o.status==='Completed'&&String(o.voucherId)===String(v.id)).length;return [esc(v.code),v.type==='percent'?'Percentage':'Fixed RM',v.type==='percent'?esc(v.value)+'%':RM(v.value),v.scope==='member'?esc(db.customers.find(c=>String(c.id)===String(v.customerId))?.name||'Deleted member'):'General POS',esc((v.starts||'Any')+' — '+(v.expires||'No expiry')),`${uses}${v.limit?'/'+v.limit:''}`,v.active===false?'Disabled':'Active',`<button class="btn" onclick="editVoucher(${v.id})">Edit</button> <button class="btn d" onclick="deleteVoucher(${v.id})">Remove</button>`];}))}</div>`;}
-function editVoucher(id){const v=db.vouchers.find(x=>x.id===id)||{code:'',type:'fixed',value:5,scope:'public',customerId:'',active:true,limit:0,perCustomerLimit:0,starts:'',expires:''};$('#modal').innerHTML=`<div class="box"><h3>${id?'Edit':'New'} POS voucher</h3><label>Voucher code<input id="vc-code" value="${esc(v.code)}" maxlength="40" placeholder="WELCOME5"></label><div class="grid2"><label>Discount type<select id="vc-type"><option value="fixed" ${v.type==='fixed'?'selected':''}>Fixed RM</option><option value="percent" ${v.type==='percent'?'selected':''}>Percentage</option></select></label><label>Value<input id="vc-value" type="number" step="0.01" min="0" value="${esc(v.value)}"></label><label>Audience<select id="vc-scope"><option value="public" ${v.scope==='public'?'selected':''}>General POS</option><option value="member" ${v.scope==='member'?'selected':''}>One member only</option></select></label><label>Assigned member<select id="vc-customer"><option value="">— None —</option>${db.customers.map(c=>`<option value="${esc(c.id)}" ${String(c.id)===String(v.customerId)?'selected':''}>${esc(c.name)}</option>`).join('')}</select></label><label>Starts<input id="vc-start" type="date" value="${esc(v.starts||'')}"></label><label>Expires<input id="vc-expires" type="date" value="${esc(v.expires||'')}"></label><label>Max total uses (0 unlimited)<input id="vc-limit" type="number" min="0" step="1" value="${esc(v.limit||0)}"></label><label>Max uses per customer (0 unlimited)<input id="vc-per" type="number" min="0" step="1" value="${esc(v.perCustomerLimit||0)}"></label></div><label><input type="checkbox" id="vc-active" ${v.active!==false?'checked':''}> Voucher enabled</label><div class="row"><button class="btn p" onclick="saveVoucher(${id||'null'})">Save voucher</button><button class="btn" onclick="closeM()">Cancel</button></div></div>`;$('#modal').style.display='flex';}
-function saveVoucher(id){const code=$('#vc-code').value.trim().toUpperCase(),type=$('#vc-type').value,value=Number($('#vc-value').value),scope=$('#vc-scope').value,customerId=$('#vc-customer').value,starts=$('#vc-start').value,expires=$('#vc-expires').value,limit=Number($('#vc-limit').value),perCustomerLimit=Number($('#vc-per').value);if(!/^[A-Z0-9_-]{3,40}$/.test(code)||!Number.isFinite(value)||value<=0||(type==='percent'&&value>100)||!Number.isSafeInteger(limit)||limit<0||!Number.isSafeInteger(perCustomerLimit)||perCustomerLimit<0||(scope==='member'&&!customerId)||(starts&&expires&&starts>expires))return alert('Invalid voucher. Use a 3–40 character code, a positive discount and valid limits/dates.');if(db.vouchers.some(v=>v.code.toUpperCase()===code&&String(v.id)!==String(id)))return alert('Voucher code already exists');const payload={code,type,value,scope,customerId:scope==='member'?customerId:null,starts,expires,limit,perCustomerLimit,active:$('#vc-active').checked},old=db.vouchers.find(v=>v.id===id);if(old)Object.assign(old,payload);else db.vouchers.push({id:uid(),...payload});save();closeM();go('vouchers');}
-function deleteVoucher(id){if(db.orders.some(o=>String(o.voucherId)===String(id)))return alert('Voucher has transaction history; disable it instead of deleting.');if(!confirm('Remove this voucher?'))return;db.vouchers=db.vouchers.filter(v=>v.id!==id);save();go('vouchers');}
+/* ---------- Public vouchers & member point-reward voucher claims ---------- */
+function vouchers(){
+ const claimed=db.voucherClaims.slice().reverse();
+ return `<h2>Voucher Management</h2><div class="card"><div class="row"><button class="btn p" onclick="editVoucher()">+ Create voucher</button><button class="btn" onclick="go('cust')">Members &amp; points</button></div>
+ <p class="mut">A voucher with a points cost is a reward: first claim it for an existing member. The points are deducted when claimed; the member can apply that voucher once at POS. A voucher with 0-point cost works as a regular POS voucher. Points cannot be used directly to reduce a bill.</p>
+ ${tbl(['Code','Type','Value','Audience','Points to claim','Validity','Usage','Status','Actions'],db.vouchers.map(v=>{const uses=db.orders.filter(o=>o.status==='Completed'&&String(o.voucherId)===String(v.id)).length;return [esc(v.code),v.type==='percent'?'Percentage':'Fixed RM',v.type==='percent'?esc(v.value)+'%':RM(v.value),v.scope==='member'?esc(db.customers.find(c=>String(c.id)===String(v.customerId))?.name||'Deleted member'):'General POS',Number(v.pointsCost||0)>0?`${Number(v.pointsCost)} pts`:'Free voucher',esc((v.starts||'Any')+' — '+(v.expires||'No expiry')),`${uses}${v.limit?'/'+v.limit:''}`,v.active===false?'Disabled':'Active',`<button class="btn" onclick="editVoucher(${v.id})">Edit</button> ${Number(v.pointsCost||0)>0?`<button class="btn p" onclick="openVoucherClaim(${v.id})">Claim for member</button>`:''} <button class="btn d" onclick="deleteVoucher(${v.id})">Remove</button>`];}))}</div>
+ <div class="card"><h3>Points voucher claim history</h3>${tbl(['Claimed','Member','Voucher','Points used','Status','Used in sale'],claimed.map(r=>[esc(r.createdAt||r.date||''),esc(db.customers.find(c=>String(c.id)===String(r.customerId))?.name||'Unknown'),esc(r.voucherCode||db.vouchers.find(v=>String(v.id)===String(r.voucherId))?.code||'Unknown'),esc(r.points),esc(r.status||'Claimed'),esc(r.usedOrderId||'—')]))}</div>`;
+}
+function editVoucher(id){const v=db.vouchers.find(x=>x.id===id)||{code:'',type:'fixed',value:5,scope:'public',customerId:'',active:true,limit:0,perCustomerLimit:0,starts:'',expires:'',pointsCost:0};$('#modal').innerHTML=`<div class="box"><h3>${id?'Edit':'New'} POS voucher</h3><label>Voucher code<input id="vc-code" value="${esc(v.code)}" maxlength="40" placeholder="WELCOME5"></label><div class="grid2"><label>Discount type<select id="vc-type"><option value="fixed" ${v.type==='fixed'?'selected':''}>Fixed RM</option><option value="percent" ${v.type==='percent'?'selected':''}>Percentage</option></select></label><label>Value<input id="vc-value" type="number" step="0.01" min="0" value="${esc(v.value)}"></label><label>Points to claim (0 = regular free voucher)<input id="vc-points" type="number" step="1" min="0" value="${esc(v.pointsCost||0)}"></label><label>Audience<select id="vc-scope"><option value="public" ${v.scope==='public'?'selected':''}>All members / general POS</option><option value="member" ${v.scope==='member'?'selected':''}>One member only</option></select></label><label>Assigned member<select id="vc-customer"><option value="">— None —</option>${db.customers.map(c=>`<option value="${esc(c.id)}" ${String(c.id)===String(v.customerId)?'selected':''}>${esc(c.name)}</option>`).join('')}</select></label><label>Starts<input id="vc-start" type="date" value="${esc(v.starts||'')}"></label><label>Expires<input id="vc-expires" type="date" value="${esc(v.expires||'')}"></label><label>Max total uses (0 unlimited)<input id="vc-limit" type="number" min="0" step="1" value="${esc(v.limit||0)}"></label><label>Max uses per customer (0 unlimited)<input id="vc-per" type="number" min="0" step="1" value="${esc(v.perCustomerLimit||0)}"></label></div><label><input type="checkbox" id="vc-active" ${v.active!==false?'checked':''}> Voucher enabled</label><p class="mut">If this voucher has existing point claims, its reward rules are locked to protect members. You can still enable or disable it.</p><div class="row"><button class="btn p" onclick="saveVoucher(${id||'null'})">Save voucher</button><button class="btn" onclick="closeM()">Cancel</button></div></div>`;$('#modal').style.display='flex';}
+function saveVoucher(id){const code=$('#vc-code').value.trim().toUpperCase(),type=$('#vc-type').value,value=Number($('#vc-value').value),scope=$('#vc-scope').value,customerId=$('#vc-customer').value,starts=$('#vc-start').value,expires=$('#vc-expires').value,limit=Number($('#vc-limit').value),perCustomerLimit=Number($('#vc-per').value),pointsCost=Number($('#vc-points').value);if(!/^[A-Z0-9_-]{3,40}$/.test(code)||!Number.isFinite(value)||value<=0||(type==='percent'&&value>100)||!Number.isSafeInteger(pointsCost)||pointsCost<0||!Number.isSafeInteger(limit)||limit<0||!Number.isSafeInteger(perCustomerLimit)||perCustomerLimit<0||(scope==='member'&&!customerId)||(starts&&expires&&starts>expires))return alert('Invalid voucher. Check its code, value, whole-number points, limits, and dates.');if(db.vouchers.some(v=>v.code.toUpperCase()===code&&String(v.id)!==String(id)))return alert('Voucher code already exists');const payload={code,type,value,scope,customerId:scope==='member'?customerId:null,starts,expires,limit,perCustomerLimit,pointsCost,active:$('#vc-active').checked},old=db.vouchers.find(v=>v.id===id);
+ if(old&&db.voucherClaims.some(r=>String(r.voucherId)===String(id))){const fields=['code','type','value','scope','customerId','starts','expires','limit','perCustomerLimit','pointsCost'];if(fields.some(k=>String(old[k]??'')!==String(payload[k]??'')))return alert('This voucher already has member point claims. Only its enabled status may be changed.');}
+ if(old)Object.assign(old,payload);else db.vouchers.push({id:uid(),...payload});save();closeM();go('vouchers');}
+function deleteVoucher(id){if(db.orders.some(o=>String(o.voucherId)===String(id))||db.voucherClaims.some(r=>String(r.voucherId)===String(id)))return alert('Voucher has sale or point claim history; disable it instead of deleting.');if(!confirm('Remove this voucher?'))return;db.vouchers=db.vouchers.filter(v=>v.id!==id);save();go('vouchers');}
+function openVoucherClaim(id){const v=db.vouchers.find(x=>x.id===id);if(!v||Number(v.pointsCost||0)<1)return alert('Only point-reward vouchers need a claim.');if(v.active===false)return alert('Voucher is disabled');$('#modal').innerHTML=`<div class="box"><h3>Claim ${esc(v.code)} for a member</h3><p>${v.type==='percent'?esc(v.value)+'% discount':RM(v.value)+' discount'} · <b>${v.pointsCost} points</b></p><label>Existing member<select id="voucher-claim-member"><option value="">— Select member —</option>${db.customers.filter(c=>v.scope!=='member'||String(c.id)===String(v.customerId)).map(c=>`<option value="${esc(c.id)}">${esc(c.name)} · ${customerPoints(c)} points available</option>`).join('')}</select></label><p class="mut">This claim deducts points immediately and issues one single-use voucher. Points are not converted to cash at checkout.</p><div class="row"><button id="voucher-claim-submit" class="btn p" onclick="claimVoucher(${id})">Confirm points claim</button><button class="btn" onclick="closeM()">Cancel</button></div></div>`;$('#modal').style.display='flex';}
+let voucherClaimBusy=false,pendingVoucherClaim=null;
+async function claimVoucher(id){if(voucherClaimBusy)return;const v=db.vouchers.find(x=>x.id===id),memberId=$('#voucher-claim-member')?.value;if(!v||!memberId)return alert('Select an eligible existing member.');if(!cloudReady||cloudFailed)return alert('Cloud is not ready');const member=db.customers.find(c=>String(c.id)===String(memberId));if(!member||customerPoints(member)<Number(v.pointsCost||0))return alert('Member has insufficient loyalty points.');voucherClaimBusy=true;const b=$('#voucher-claim-submit');b.disabled=true;try{await cloudQueue;if(cloudFailed)throw new Error('Cloud save failed. Export backup and reload.');const signature=[id,memberId].join(':');if(pendingVoucherClaim&&pendingVoucherClaim.signature!==signature)throw new Error('Previous claim may be unresolved. Verify claim history and refresh first.');if(!pendingVoucherClaim)pendingVoucherClaim={signature,requestId:(crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random()}-${Math.random()}`)};const {data,error}=await sb.rpc('tt_claim_voucher',{expected_version:cloudVersion,claim:{requestId:pendingVoucherClaim.requestId,voucherId:id,customerId:memberId,date:today()}});if(error)throw error;const {data:latest,error:readError}=await sb.from('business_state').select('payload,version').eq('user_id',cloudUser.id).single();if(readError)throw readError;db=upgradeDb(latest.payload);cloudVersion=latest.version;pendingVoucherClaim=null;closeM();go('vouchers');toast('Voucher claimed — points deducted and single-use reward issued');}catch(e){alert('Voucher claim not confirmed: '+e.message+' Check claim history and refresh before retrying.');}finally{voucherClaimBusy=false;if(b.isConnected)b.disabled=false;}}
 
 /* ---------- reports ---------- */
 let from = today().slice(0, 8) + '01', to = today(), reportSeller = 'all';
